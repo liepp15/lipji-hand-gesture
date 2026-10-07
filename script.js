@@ -3,6 +3,9 @@ import {
     FilesetResolver
 } from "@mediapipe/tasks-vision";
 
+// ===============================
+// ELEMENTS
+// ===============================
 const video = document.getElementById("camera");
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
@@ -10,82 +13,57 @@ const ctx = canvas.getContext("2d");
 const gestureText = document.getElementById("gesture");
 const fingerText = document.getElementById("fingerCount");
 const loading = document.getElementById("loading");
-const switchButton = document.getElementById("switchCamera");
+const switchCamera = document.getElementById("switchCamera");
+
+// ===============================
+// CONFIG
+// ===============================
+const WASM_URL =
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm";
+
+const MODEL_URL =
+    "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 
 let handLandmarker;
-let currentStream;
+let stream = null;
 let facingMode = "user";
-
-let currentGesture = "NONE";
-let targetGesture = "NONE";
-
-let gestureCandidate = "NONE";
-let candidateFrames = 0;
-
-let particles = [];
-let trails = [];
-
-let objectX = 0;
-let objectY = 0;
-
-let targetX = 0;
-let targetY = 0;
-
-let rotation = 0;
-let energy = 0;
-
 let lastVideoTime = -1;
 
+let currentGesture = "NONE";
+let candidateGesture = "NONE";
+let candidateFrames = 0;
 
-// ======================================================
-// CONFIG
-// ======================================================
+const gestureConfirmFrames = 6;
 
-const CONFIG = {
+// Smooth hand position
+let handX = 0.5;
+let handY = 0.5;
 
-    // Gesture harus terbaca beberapa frame
-    // sebelum dianggap valid.
-    gestureConfirmFrames: 8,
+const smoothing = 0.18;
 
-    // Seberapa cepat objek mengikuti tangan.
-    positionSmoothing: 0.16,
+// Shape animation
+let rotation = 0;
+let pulse = 0;
 
-    // Seberapa cepat rotasi berubah.
-    rotationSpeed: 0.025,
+// Particles
+const particles = [];
 
-    // Jumlah particle ketika shape pecah.
-    burstParticles: 90,
+// ===============================
+// INIT MEDIAPIPE
+// ===============================
+async function initHandTracking() {
+    try {
+        const vision = await FilesetResolver.forVisionTasks(WASM_URL);
 
-    // Particle chaos.
-    chaosParticles: 12
-};
-
-
-// ======================================================
-// MEDIAPIPE
-// ======================================================
-
-async function setupHandTracking() {
-
-    const vision =
-        await FilesetResolver.forVisionTasks(
-            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm"
-        );
-
-    handLandmarker =
-        await HandLandmarker.createFromOptions(
+        handLandmarker = await HandLandmarker.createFromOptions(
             vision,
             {
                 baseOptions: {
-
-                    modelAssetPath:
-                        "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-
+                    modelAssetPath: MODEL_URL,
                     delegate: "GPU"
                 },
 
                 runningMode: "VIDEO",
-
                 numHands: 1,
 
                 minHandDetectionConfidence: 0.5,
@@ -94,324 +72,219 @@ async function setupHandTracking() {
             }
         );
 
-    loading.style.display = "none";
+        console.log("MediaPipe loaded successfully");
 
-    await startCamera();
+        await startCamera();
+
+        loading.style.display = "none";
+
+    } catch (error) {
+        console.error("MediaPipe error:", error);
+
+        loading.innerHTML = `
+            <p style="color:#ff5555">
+                Failed to load hand tracking.
+            </p>
+            <small>${error.message}</small>
+        `;
+    }
 }
 
-
-// ======================================================
+// ===============================
 // CAMERA
-// ======================================================
-
+// ===============================
 async function startCamera() {
 
-    if (currentStream) {
-
-        currentStream
-            .getTracks()
-            .forEach(track => track.stop());
+    if (stream) {
+        stream.getTracks().forEach(track => track.stop());
     }
 
-    currentStream =
-        await navigator.mediaDevices.getUserMedia({
+    try {
 
+        stream = await navigator.mediaDevices.getUserMedia({
             video: {
-
-                facingMode,
-
-                width: {
-                    ideal: 1280
-                },
-
-                height: {
-                    ideal: 720
-                }
+                facingMode: facingMode,
+                width: { ideal: 1280 },
+                height: { ideal: 720 }
             },
-
             audio: false
         });
 
-    video.srcObject = currentStream;
+        video.srcObject = stream;
 
-    await video.play();
+        await video.play();
 
-    resizeCanvas();
+        resizeCanvas();
 
-    requestAnimationFrame(detect);
+        requestAnimationFrame(loop);
+
+    } catch (error) {
+
+        console.error("Camera error:", error);
+
+        loading.innerHTML = `
+            <p style="color:#ff5555">
+                Camera access denied.
+            </p>
+        `;
+    }
 }
 
-
-// ======================================================
-// RESIZE
-// ======================================================
-
+// ===============================
+// CANVAS
+// ===============================
 function resizeCanvas() {
 
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
-
-    if (!objectX) {
-
-        objectX =
-            canvas.width / 2;
-
-        objectY =
-            canvas.height / 2;
-
-        targetX = objectX;
-        targetY = objectY;
-    }
 }
 
-window.addEventListener(
-    "resize",
-    resizeCanvas
-);
+window.addEventListener("resize", resizeCanvas);
 
+// ===============================
+// FINGER DETECTION
+// ===============================
+function distance(a, b) {
 
-// ======================================================
-// FINGER COUNT
-// ======================================================
+    return Math.sqrt(
+        Math.pow(a.x - b.x, 2) +
+        Math.pow(a.y - b.y, 2) +
+        Math.pow(a.z - b.z, 2)
+    );
+}
 
-function countFingers(hand) {
+function isFingerExtended(landmarks, tip, pip) {
+
+    return landmarks[tip].y < landmarks[pip].y;
+}
+
+function countFingers(landmarks) {
 
     let count = 0;
 
-    // Thumb
-    if (hand[4].x < hand[3].x) {
-        count++;
-    }
-
     // Index
-    if (hand[8].y < hand[6].y) {
+    if (isFingerExtended(landmarks, 8, 6))
         count++;
-    }
 
     // Middle
-    if (hand[12].y < hand[10].y) {
+    if (isFingerExtended(landmarks, 12, 10))
         count++;
-    }
 
     // Ring
-    if (hand[16].y < hand[14].y) {
+    if (isFingerExtended(landmarks, 16, 14))
         count++;
-    }
 
     // Pinky
-    if (hand[20].y < hand[18].y) {
+    if (isFingerExtended(landmarks, 20, 18))
+        count++;
+
+    // Thumb
+    const thumbTip = landmarks[4];
+    const thumbIP = landmarks[3];
+
+    if (distance(thumbTip, landmarks[5]) >
+        distance(thumbIP, landmarks[5])) {
+
         count++;
     }
 
     return count;
 }
 
+// ===============================
+// GESTURE
+// ===============================
+function getGesture(fingers) {
 
-// ======================================================
-// GESTURE MAP
-// ======================================================
+    switch (fingers) {
 
-function detectGesture(fingers) {
+        case 0:
+            return "CIRCLE";
 
-    if (fingers === 0)
-        return "CIRCLE";
+        case 1:
+            return "HEART";
 
-    if (fingers === 1)
-        return "HEART";
+        case 2:
+            return "CUBE";
 
-    if (fingers === 2)
-        return "CUBE";
+        case 3:
+            return "TRIANGLE";
 
-    if (fingers === 3)
-        return "TRIANGLE";
+        case 5:
+            return "CHAOS";
 
-    if (fingers === 5)
-        return "CHAOS";
-
-    return "UNKNOWN";
+        default:
+            return "NONE";
+    }
 }
 
-
-// ======================================================
+// ===============================
 // GESTURE SMOOTHING
-// ======================================================
+// ===============================
+function updateGesture(newGesture) {
 
-function smoothGesture(newGesture) {
-
-    if (newGesture === "UNKNOWN") {
-        return;
-    }
-
-    if (newGesture === gestureCandidate) {
+    if (newGesture === candidateGesture) {
 
         candidateFrames++;
 
     } else {
 
-        gestureCandidate = newGesture;
-        candidateFrames = 1;
+        candidateGesture = newGesture;
+        candidateFrames = 0;
     }
 
-
     if (
-        candidateFrames >=
-        CONFIG.gestureConfirmFrames
+        candidateFrames >= gestureConfirmFrames &&
+        currentGesture !== candidateGesture
     ) {
 
-        if (
-            currentGesture !==
-            gestureCandidate
-        ) {
+        explodeShape();
 
-            changeGesture(
-                gestureCandidate
-            );
-        }
+        currentGesture = candidateGesture;
+
+        console.log("Gesture:", currentGesture);
     }
 }
 
-
-// ======================================================
-// GESTURE CHANGE
-// ======================================================
-
-function changeGesture(newGesture) {
-
-    if (
-        currentGesture ===
-        newGesture
-    ) {
-        return;
-    }
-
-
-    // Pecahkan objek sebelumnya
-    if (
-        currentGesture !== "NONE" &&
-        currentGesture !== "CHAOS"
-    ) {
-
-        explodeObject();
-    }
-
-
-    currentGesture = newGesture;
-
-    gestureText.textContent =
-        newGesture;
-
-
-    // Energy burst
-    energy = 1;
-
-
-    // Spawn particle menuju bentuk baru
-    if (
-        newGesture !== "CHAOS"
-    ) {
-
-        spawnTransitionParticles();
-    }
-}
-
-
-// ======================================================
-// PARTICLE CLASS
-// ======================================================
-
+// ===============================
+// PARTICLE
+// ===============================
 class Particle {
 
-    constructor(
-        x,
-        y,
-        targetX,
-        targetY,
-        explosive = false
-    ) {
+    constructor(x, y, power = 1) {
 
         this.x = x;
         this.y = y;
 
-        this.startX = x;
-        this.startY = y;
+        const angle =
+            Math.random() * Math.PI * 2;
 
-        this.targetX = targetX;
-        this.targetY = targetY;
+        const speed =
+            (Math.random() * 8 + 2) * power;
 
-        this.vx =
-            (Math.random() - 0.5) *
-            (explosive ? 18 : 4);
-
-        this.vy =
-            (Math.random() - 0.5) *
-            (explosive ? 18 : 4);
+        this.vx = Math.cos(angle) * speed;
+        this.vy = Math.sin(angle) * speed;
 
         this.life = 1;
 
-        this.decay =
-            explosive
-                ? 0.012 + Math.random() * 0.018
-                : 0.006 + Math.random() * 0.008;
-
         this.size =
             Math.random() * 4 + 1;
-
-        this.phase =
-            Math.random() *
-            Math.PI * 2;
     }
 
-
     update() {
-
-        this.phase += 0.08;
-
-
-        if (
-            this.targetX !== null &&
-            this.targetY !== null
-        ) {
-
-            const dx =
-                this.targetX -
-                this.x;
-
-            const dy =
-                this.targetY -
-                this.y;
-
-
-            this.vx += dx * 0.015;
-            this.vy += dy * 0.015;
-        }
-
-
-        this.vx *= 0.96;
-        this.vy *= 0.96;
-
 
         this.x += this.vx;
         this.y += this.vy;
 
+        this.vx *= 0.97;
+        this.vy *= 0.97;
 
-        this.life -= this.decay;
+        this.life -= 0.025;
     }
-
 
     draw() {
 
-        ctx.save();
-
-        ctx.globalAlpha =
-            Math.max(0, this.life);
-
-        ctx.shadowBlur = 15;
-
-        ctx.shadowColor =
-            "rgba(255,255,255,0.9)";
-
-        ctx.fillStyle = "white";
-
+        ctx.globalAlpha = this.life;
 
         ctx.beginPath();
 
@@ -425,276 +298,95 @@ class Particle {
 
         ctx.fill();
 
-        ctx.restore();
+        ctx.globalAlpha = 1;
     }
 }
 
-
-// ======================================================
+// ===============================
 // EXPLOSION
-// ======================================================
+// ===============================
+function explodeShape() {
 
-function explodeObject() {
+    const cx = handX * canvas.width;
+    const cy = handY * canvas.height;
 
-    const count =
-        CONFIG.burstParticles;
-
-
-    for (let i = 0; i < count; i++) {
-
-        const angle =
-            Math.random() *
-            Math.PI * 2;
-
-        const radius =
-            Math.random() * 100;
-
-
-        const x =
-            objectX +
-            Math.cos(angle) *
-            radius;
-
-        const y =
-            objectY +
-            Math.sin(angle) *
-            radius;
-
+    for (let i = 0; i < 90; i++) {
 
         particles.push(
-
             new Particle(
-                x,
-                y,
-                null,
-                null,
-                true
+                cx,
+                cy,
+                Math.random() * 2 + 0.5
             )
-
         );
     }
 }
 
+// ===============================
+// UPDATE PARTICLES
+// ===============================
+function updateParticles() {
 
-// ======================================================
-// TRANSITION PARTICLES
-// ======================================================
+    for (let i = particles.length - 1; i >= 0; i--) {
 
-function spawnTransitionParticles() {
+        particles[i].update();
 
-    for (
-        let i = 0;
-        i < 45;
-        i++
-    ) {
+        if (particles[i].life <= 0) {
 
-        const angle =
-            Math.random() *
-            Math.PI * 2;
+            particles.splice(i, 1);
 
-        const radius =
-            Math.random() * 120;
+        } else {
 
-
-        const startX =
-            objectX +
-            Math.cos(angle) *
-            radius;
-
-        const startY =
-            objectY +
-            Math.sin(angle) *
-            radius;
-
-
-        const targetX =
-            objectX +
-            (Math.random() - 0.5) *
-            220;
-
-        const targetY =
-            objectY +
-            (Math.random() - 0.5) *
-            220;
-
-
-        particles.push(
-
-            new Particle(
-                startX,
-                startY,
-                targetX,
-                targetY
-            )
-
-        );
-    }
-}
-
-
-// ======================================================
-// CHAOS
-// ======================================================
-
-function spawnChaos() {
-
-    for (
-        let i = 0;
-        i < CONFIG.chaosParticles;
-        i++
-    ) {
-
-        particles.push(
-
-            new Particle(
-                objectX,
-                objectY,
-                null,
-                null,
-                true
-            )
-
-        );
-    }
-}
-
-
-// ======================================================
-// ENERGY RING
-// ======================================================
-
-function drawEnergyRing() {
-
-    if (energy <= 0)
-        return;
-
-
-    ctx.save();
-
-    ctx.globalAlpha =
-        energy;
-
-    ctx.strokeStyle =
-        "rgba(255,255,255,0.9)";
-
-    ctx.lineWidth = 3;
-
-    ctx.shadowBlur = 30;
-
-    ctx.shadowColor =
-        "white";
-
-
-    ctx.beginPath();
-
-    ctx.arc(
-        objectX,
-        objectY,
-        80 + (1 - energy) * 100,
-        0,
-        Math.PI * 2
-    );
-
-    ctx.stroke();
-
-    ctx.restore();
-
-
-    energy -= 0.025;
-}
-
-
-// ======================================================
-// TRAIL
-// ======================================================
-
-function updateTrail() {
-
-    trails.push({
-
-        x: objectX,
-
-        y: objectY,
-
-        life: 1
-    });
-
-
-    if (trails.length > 15) {
-        trails.shift();
-    }
-
-
-    trails.forEach(
-        (trail, index) => {
-
-            trail.life -= 0.07;
-
-
-            ctx.save();
-
-            ctx.globalAlpha =
-                Math.max(
-                    0,
-                    trail.life * 0.18
-                );
-
-            ctx.fillStyle =
-                "white";
-
-
-            ctx.beginPath();
-
-            ctx.arc(
-                trail.x,
-                trail.y,
-                5 + index * 0.4,
-                0,
-                Math.PI * 2
-            );
-
-            ctx.fill();
-
-            ctx.restore();
+            particles[i].draw();
         }
-    );
+    }
 }
 
-
-// ======================================================
+// ===============================
 // SHAPES
-// ======================================================
+// ===============================
+function drawCircle(x, y) {
 
-function drawCircle() {
+    const radius =
+        100 + Math.sin(pulse) * 10;
 
-    ctx.save();
-
-    ctx.translate(
-        objectX,
-        objectY
-    );
-
-    ctx.rotate(rotation);
-
-    ctx.strokeStyle =
-        "white";
-
-    ctx.lineWidth = 5;
-
-    ctx.shadowBlur = 30;
-
-    ctx.shadowColor =
-        "white";
-
+    ctx.lineWidth = 8;
 
     ctx.beginPath();
 
     ctx.arc(
-        0,
-        0,
-        75,
+        x,
+        y,
+        radius,
         0,
         Math.PI * 2
+    );
+
+    ctx.stroke();
+}
+
+function drawHeart(x, y) {
+
+    ctx.save();
+
+    ctx.translate(x, y);
+
+    ctx.scale(5, 5);
+
+    ctx.beginPath();
+
+    ctx.moveTo(0, 30);
+
+    ctx.bezierCurveTo(
+        -50, -5,
+        -40, -45,
+        0, -20
+    );
+
+    ctx.bezierCurveTo(
+        40, -45,
+        50, -5,
+        0, 30
     );
 
     ctx.stroke();
@@ -702,59 +394,34 @@ function drawCircle() {
     ctx.restore();
 }
 
+function drawTriangle(x, y) {
 
-function drawTriangle() {
+    const size = 120;
 
     ctx.save();
 
-    ctx.translate(
-        objectX,
-        objectY
-    );
+    ctx.translate(x, y);
 
     ctx.rotate(rotation);
 
-
-    ctx.strokeStyle =
-        "white";
-
-    ctx.lineWidth = 5;
-
-    ctx.shadowBlur = 25;
-
-    ctx.shadowColor =
-        "white";
-
-
-    const size = 95;
-
-
     ctx.beginPath();
 
-    for (
-        let i = 0;
-        i < 3;
-        i++
-    ) {
+    for (let i = 0; i < 3; i++) {
 
         const angle =
             -Math.PI / 2 +
-            i * Math.PI * 2 / 3;
+            i * (Math.PI * 2 / 3);
 
+        const px =
+            Math.cos(angle) * size;
 
-        const x =
-            Math.cos(angle) *
-            size;
-
-        const y =
-            Math.sin(angle) *
-            size;
-
+        const py =
+            Math.sin(angle) * size;
 
         if (i === 0)
-            ctx.moveTo(x, y);
+            ctx.moveTo(px, py);
         else
-            ctx.lineTo(x, y);
+            ctx.lineTo(px, py);
     }
 
     ctx.closePath();
@@ -764,215 +431,139 @@ function drawTriangle() {
     ctx.restore();
 }
 
+function drawCube(x, y) {
 
-function drawHeart() {
+    const size = 100;
 
     ctx.save();
 
-    ctx.translate(
-        objectX,
-        objectY
+    ctx.translate(x, y);
+
+    ctx.rotate(rotation * 0.5);
+
+    const offset = 40;
+
+    // Front
+    ctx.strokeRect(
+        -size / 2,
+        -size / 2,
+        size,
+        size
     );
 
-    ctx.rotate(
-        Math.sin(rotation) * 0.08
+    // Back
+    ctx.strokeRect(
+        -size / 2 + offset,
+        -size / 2 - offset,
+        size,
+        size
     );
 
+    // Connections
+    const corners = [
+        [-size / 2, -size / 2],
+        [size / 2, -size / 2],
+        [-size / 2, size / 2],
+        [size / 2, size / 2]
+    ];
 
-    ctx.strokeStyle =
-        "white";
+    corners.forEach(([cx, cy]) => {
 
-    ctx.lineWidth = 5;
+        ctx.beginPath();
 
-    ctx.shadowBlur = 30;
+        ctx.moveTo(cx, cy);
 
-    ctx.shadowColor =
-        "white";
+        ctx.lineTo(
+            cx + offset,
+            cy - offset
+        );
 
-
-    ctx.beginPath();
-
-    ctx.moveTo(
-        0,
-        75
-    );
-
-    ctx.bezierCurveTo(
-        -120,
-        0,
-        -90,
-        -100,
-        0,
-        -45
-    );
-
-    ctx.bezierCurveTo(
-        90,
-        -100,
-        120,
-        0,
-        0,
-        75
-    );
-
-    ctx.stroke();
+        ctx.stroke();
+    });
 
     ctx.restore();
 }
 
+// ===============================
+// DRAW SHAPE
+// ===============================
+function drawShape() {
 
-function drawCube() {
+    const x = handX * canvas.width;
+    const y = handY * canvas.height;
 
     ctx.save();
-
-    ctx.translate(
-        objectX,
-        objectY
-    );
-
-    ctx.rotate(rotation);
-
-
-    const size = 70;
-    const offset = 35;
-
-
-    ctx.strokeStyle =
-        "white";
 
     ctx.lineWidth = 4;
 
     ctx.shadowBlur = 25;
 
-    ctx.shadowColor =
-        "white";
-
-
-    ctx.strokeRect(
-        -size,
-        -size,
-        size * 2,
-        size * 2
-    );
-
-
-    ctx.strokeRect(
-        -size + offset,
-        -size - offset,
-        size * 2,
-        size * 2
-    );
-
-
-    const corners = [
-
-        [-size, -size],
-        [size, -size],
-        [-size, size],
-        [size, size]
-
-    ];
-
-
-    corners.forEach(
-        ([x, y]) => {
-
-            ctx.beginPath();
-
-            ctx.moveTo(x, y);
-
-            ctx.lineTo(
-                x + offset,
-                y - offset
-            );
-
-            ctx.stroke();
-        }
-    );
-
-
-    ctx.restore();
-}
-
-
-// ======================================================
-// DRAW CURRENT OBJECT
-// ======================================================
-
-function drawCurrentShape() {
+    ctx.beginPath();
 
     switch (currentGesture) {
 
         case "CIRCLE":
-            drawCircle();
+            drawCircle(x, y);
             break;
 
         case "HEART":
-            drawHeart();
+            drawHeart(x, y);
             break;
 
         case "CUBE":
-            drawCube();
+            drawCube(x, y);
             break;
 
         case "TRIANGLE":
-            drawTriangle();
+            drawTriangle(x, y);
             break;
 
         case "CHAOS":
-            spawnChaos();
+
+            for (let i = 0; i < 4; i++) {
+
+                particles.push(
+                    new Particle(
+                        x,
+                        y,
+                        0.5
+                    )
+                );
+            }
+
             break;
     }
+
+    ctx.restore();
 }
 
+// ===============================
+// MAIN LOOP
+// ===============================
+async function loop() {
 
-// ======================================================
-// PARTICLE UPDATE
-// ======================================================
+    if (!handLandmarker) {
 
-function updateParticles() {
-
-    particles =
-        particles.filter(
-            particle => {
-
-                particle.update();
-
-                particle.draw();
-
-                return particle.life > 0;
-            }
-        );
-}
-
-
-// ======================================================
-// MAIN DETECTION
-// ======================================================
-
-async function detect() {
-
-    if (
-        !handLandmarker ||
-        video.readyState < 2
-    ) {
-
-        requestAnimationFrame(
-            detect
-        );
-
+        requestAnimationFrame(loop);
         return;
     }
 
+    ctx.clearRect(
+        0,
+        0,
+        canvas.width,
+        canvas.height
+    );
+
+    rotation += 0.02;
+    pulse += 0.08;
 
     if (
-        video.currentTime !==
-        lastVideoTime
+        video.readyState >= 2 &&
+        video.currentTime !== lastVideoTime
     ) {
 
-        lastVideoTime =
-            video.currentTime;
-
+        lastVideoTime = video.currentTime;
 
         const results =
             handLandmarker.detectForVideo(
@@ -980,103 +571,69 @@ async function detect() {
                 performance.now()
             );
 
-
-        ctx.clearRect(
-            0,
-            0,
-            canvas.width,
-            canvas.height
-        );
-
-
         if (
             results.landmarks &&
-            results.landmarks.length
+            results.landmarks.length > 0
         ) {
 
-            const hand =
+            const landmarks =
                 results.landmarks[0];
 
+            // Hand center
+            let targetX = 0;
+            let targetY = 0;
+
+            for (const point of landmarks) {
+
+                targetX += point.x;
+                targetY += point.y;
+            }
+
+            targetX /= landmarks.length;
+            targetY /= landmarks.length;
+
+            handX +=
+                (targetX - handX) *
+                smoothing;
+
+            handY +=
+                (targetY - handY) *
+                smoothing;
 
             const fingers =
-                countFingers(hand);
-
+                countFingers(landmarks);
 
             const gesture =
-                detectGesture(fingers);
-
+                getGesture(fingers);
 
             fingerText.textContent =
                 `${fingers} fingers`;
 
+            gestureText.textContent =
+                gesture;
 
-            smoothGesture(
-                gesture
-            );
+            updateGesture(gesture);
 
+        } else {
 
-            // Palm center
-            const wrist =
-                hand[0];
+            fingerText.textContent =
+                "No hand";
 
-            const middle =
-                hand[9];
-
-
-            const handX =
-                (1 -
-                    (wrist.x +
-                    middle.x) / 2)
-                * canvas.width;
-
-
-            const handY =
-                ((wrist.y +
-                middle.y) / 2)
-                * canvas.height;
-
-
-            targetX = handX;
-            targetY = handY;
+            gestureText.textContent =
+                "Waiting...";
         }
-
-
-        // Smooth position
-        objectX +=
-            (targetX - objectX) *
-            CONFIG.positionSmoothing;
-
-
-        objectY +=
-            (targetY - objectY) *
-            CONFIG.positionSmoothing;
-
-
-        rotation +=
-            CONFIG.rotationSpeed;
-
-
-        updateTrail();
-
-        drawEnergyRing();
-
-        drawCurrentShape();
-
-        updateParticles();
     }
 
+    drawShape();
+    updateParticles();
 
-    requestAnimationFrame(
-        detect
-    );
+    requestAnimationFrame(loop);
 }
 
-
-// ======================================================
-// CAMERA SWITCH
-// ======================================================
-
-switchButton.addEventListener(
+// ===============================
+// SWITCH CAMERA
+// ===============================
+switchCamera.addEventListener(
     "click",
     async () => {
 
@@ -1085,24 +642,13 @@ switchButton.addEventListener(
                 ? "environment"
                 : "user";
 
+        lastVideoTime = -1;
 
         await startCamera();
     }
 );
 
-
-// ======================================================
+// ===============================
 // START
-// ======================================================
-
-setupHandTracking()
-    .catch(error => {
-
-        console.error(error);
-
-        loading.innerHTML = `
-            <p>
-                Hand tracking gagal dimuat.
-            </p>
-        `;
-    });
+// ===============================
+initHandTracking();
