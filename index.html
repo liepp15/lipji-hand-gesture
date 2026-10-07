@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand Gesture Visualizer</title>
+
+    <link rel="stylesheet" href="style.css">
+
+    <script type="importmap">
+    {
+        "imports": {
+            "@mediapipe/tasks-vision":
+            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/+esm"
+        }
+    }
+    </script>
+</head>
+
+<body>
+
+    <div class="app">
+
+        <video id="camera" autoplay playsinline></video>
+        <canvas id="canvas"></canvas>
+
+        <div class="overlay">
+
+            <div class="top-bar">
+                <div>
+                    <h1>HAND GESTURE</h1>
+                    <p>Visual Gesture System</p>
+                </div>
+
+                <button id="switchCamera">
+                    ↻ Camera
+                </button>
+            </div>
+
+            <div class="status">
+                <span id="gesture">Waiting...</span>
+                <span id="fingerCount">0 fingers</span>
+            </div>
+
+        </div>
+
+        <div id="loading">
+            <div class="loader"></div>
+            <p>Loading hand tracking...</p>
+        </div>
+
+    </div>
+
+    <script type="module" src="script.js"></script>
+
+</body>
+</html>
