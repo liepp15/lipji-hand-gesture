@@ -3,9 +3,10 @@ import {
     FilesetResolver
 } from "@mediapipe/tasks-vision";
 
-// ===============================
+// ==========================================
 // ELEMENTS
-// ===============================
+// ==========================================
+
 const video = document.getElementById("camera");
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
@@ -15,268 +16,421 @@ const fingerText = document.getElementById("fingerCount");
 const loading = document.getElementById("loading");
 const switchCamera = document.getElementById("switchCamera");
 
-// ===============================
-// CONFIG
-// ===============================
+// ==========================================
+// MEDIAPIPE
+// ==========================================
+
 const WASM_URL =
     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm";
 
 const MODEL_URL =
     "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 
-let handLandmarker;
+let handLandmarker = null;
+
 let stream = null;
+
 let facingMode = "user";
+
 let lastVideoTime = -1;
 
+// ==========================================
+// GESTURE STATE
+// ==========================================
+
 let currentGesture = "NONE";
+
 let candidateGesture = "NONE";
+
 let candidateFrames = 0;
 
-const gestureConfirmFrames = 6;
+const gestureConfirmFrames = 5;
 
-// Smooth hand position
+// ==========================================
+// HAND POSITION
+// ==========================================
+
 let handX = 0.5;
 let handY = 0.5;
 
-const smoothing = 0.18;
+const positionSmoothing = 0.2;
 
-// Shape animation
+// ==========================================
+// ANIMATION
+// ==========================================
+
 let rotation = 0;
+
 let pulse = 0;
 
-// Particles
+// ==========================================
+// PARTICLES
+// ==========================================
+
 const particles = [];
 
-// ===============================
-// INIT MEDIAPIPE
-// ===============================
-async function initHandTracking() {
+// ==========================================
+// INITIALIZE
+// ==========================================
+
+async function init() {
+
     try {
-        const vision = await FilesetResolver.forVisionTasks(WASM_URL);
 
-        handLandmarker = await HandLandmarker.createFromOptions(
-            vision,
-            {
-                baseOptions: {
-                    modelAssetPath: MODEL_URL,
-                    delegate: "GPU"
-                },
+        console.log("Loading MediaPipe...");
 
-                runningMode: "VIDEO",
-                numHands: 1,
+        const vision =
+            await FilesetResolver.forVisionTasks(
+                WASM_URL
+            );
 
-                minHandDetectionConfidence: 0.5,
-                minHandPresenceConfidence: 0.5,
-                minTrackingConfidence: 0.5
-            }
-        );
+        handLandmarker =
+            await HandLandmarker.createFromOptions(
+                vision,
+                {
+                    baseOptions: {
+                        modelAssetPath: MODEL_URL,
+                        delegate: "GPU"
+                    },
 
-        console.log("MediaPipe loaded successfully");
+                    runningMode: "VIDEO",
+
+                    numHands: 1,
+
+                    minHandDetectionConfidence: 0.3,
+
+                    minHandPresenceConfidence: 0.3,
+
+                    minTrackingConfidence: 0.3
+                }
+            );
+
+        console.log("MediaPipe READY");
 
         await startCamera();
 
         loading.style.display = "none";
 
     } catch (error) {
-        console.error("MediaPipe error:", error);
+
+        console.error("INIT ERROR:", error);
 
         loading.innerHTML = `
-            <p style="color:#ff5555">
-                Failed to load hand tracking.
-            </p>
-            <small>${error.message}</small>
+            <div style="
+                color:#ff5555;
+                text-align:center;
+                padding:20px;
+            ">
+                <h3>Hand Tracking Error</h3>
+                <p>${error.message}</p>
+            </div>
         `;
     }
 }
 
-// ===============================
+// ==========================================
 // CAMERA
-// ===============================
-async function startCamera() {
+// ==========================================
 
-    if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-    }
+async function startCamera() {
 
     try {
 
-        stream = await navigator.mediaDevices.getUserMedia({
-            video: {
-                facingMode: facingMode,
-                width: { ideal: 1280 },
-                height: { ideal: 720 }
-            },
-            audio: false
-        });
+        // Stop old camera
+        if (stream) {
+
+            stream
+                .getTracks()
+                .forEach(track => track.stop());
+        }
+
+        stream =
+            await navigator.mediaDevices.getUserMedia({
+
+                video: {
+
+                    facingMode: facingMode,
+
+                    width: {
+                        ideal: 640
+                    },
+
+                    height: {
+                        ideal: 480
+                    },
+
+                    frameRate: {
+                        ideal: 30,
+                        max: 30
+                    }
+                },
+
+                audio: false
+            });
 
         video.srcObject = stream;
 
         await video.play();
 
+        console.log(
+            "VIDEO:",
+            video.videoWidth,
+            "x",
+            video.videoHeight
+        );
+
         resizeCanvas();
 
-        requestAnimationFrame(loop);
+        lastVideoTime = -1;
 
     } catch (error) {
 
-        console.error("Camera error:", error);
+        console.error(
+            "CAMERA ERROR:",
+            error
+        );
 
         loading.innerHTML = `
-            <p style="color:#ff5555">
-                Camera access denied.
-            </p>
+            <div style="
+                color:#ff5555;
+                text-align:center;
+                padding:20px;
+            ">
+                <h3>Camera Error</h3>
+                <p>${error.message}</p>
+            </div>
         `;
     }
 }
 
-// ===============================
+// ==========================================
 // CANVAS
-// ===============================
+// ==========================================
+
 function resizeCanvas() {
 
     canvas.width = window.innerWidth;
+
     canvas.height = window.innerHeight;
 }
 
-window.addEventListener("resize", resizeCanvas);
+window.addEventListener(
+    "resize",
+    resizeCanvas
+);
 
-// ===============================
-// FINGER DETECTION
-// ===============================
+// ==========================================
+// DISTANCE
+// ==========================================
+
 function distance(a, b) {
 
+    const dx = a.x - b.x;
+
+    const dy = a.y - b.y;
+
+    const dz = a.z - b.z;
+
     return Math.sqrt(
-        Math.pow(a.x - b.x, 2) +
-        Math.pow(a.y - b.y, 2) +
-        Math.pow(a.z - b.z, 2)
+        dx * dx +
+        dy * dy +
+        dz * dz
     );
 }
 
-function isFingerExtended(landmarks, tip, pip) {
+// ==========================================
+// FINGER DETECTION
+// ==========================================
 
-    return landmarks[tip].y < landmarks[pip].y;
-}
+function countFingers(hand) {
 
-function countFingers(landmarks) {
+    let fingers = 0;
 
-    let count = 0;
-
-    // Index
-    if (isFingerExtended(landmarks, 8, 6))
-        count++;
-
-    // Middle
-    if (isFingerExtended(landmarks, 12, 10))
-        count++;
-
-    // Ring
-    if (isFingerExtended(landmarks, 16, 14))
-        count++;
-
-    // Pinky
-    if (isFingerExtended(landmarks, 20, 18))
-        count++;
-
-    // Thumb
-    const thumbTip = landmarks[4];
-    const thumbIP = landmarks[3];
-
-    if (distance(thumbTip, landmarks[5]) >
-        distance(thumbIP, landmarks[5])) {
-
-        count++;
+    // INDEX
+    if (
+        hand[8].y <
+        hand[6].y
+    ) {
+        fingers++;
     }
 
-    return count;
+    // MIDDLE
+    if (
+        hand[12].y <
+        hand[10].y
+    ) {
+        fingers++;
+    }
+
+    // RING
+    if (
+        hand[16].y <
+        hand[14].y
+    ) {
+        fingers++;
+    }
+
+    // PINKY
+    if (
+        hand[20].y <
+        hand[18].y
+    ) {
+        fingers++;
+    }
+
+    // THUMB
+    const thumbTip = hand[4];
+
+    const thumbIP = hand[3];
+
+    const thumbBase = hand[5];
+
+    if (
+        distance(
+            thumbTip,
+            thumbBase
+        ) >
+        distance(
+            thumbIP,
+            thumbBase
+        )
+    ) {
+        fingers++;
+    }
+
+    return fingers;
 }
 
-// ===============================
-// GESTURE
-// ===============================
+// ==========================================
+// GESTURE MAPPING
+// ==========================================
+
 function getGesture(fingers) {
 
-    switch (fingers) {
+    if (fingers === 0) {
 
-        case 0:
-            return "CIRCLE";
-
-        case 1:
-            return "HEART";
-
-        case 2:
-            return "CUBE";
-
-        case 3:
-            return "TRIANGLE";
-
-        case 5:
-            return "CHAOS";
-
-        default:
-            return "NONE";
+        return "CIRCLE";
     }
+
+    if (fingers === 1) {
+
+        return "HEART";
+    }
+
+    if (fingers === 2) {
+
+        return "CUBE";
+    }
+
+    if (fingers === 3) {
+
+        return "TRIANGLE";
+    }
+
+    if (fingers === 5) {
+
+        return "CHAOS";
+    }
+
+    return "NONE";
 }
 
-// ===============================
+// ==========================================
 // GESTURE SMOOTHING
-// ===============================
+// ==========================================
+
 function updateGesture(newGesture) {
 
-    if (newGesture === candidateGesture) {
+    if (
+        newGesture ===
+        candidateGesture
+    ) {
 
         candidateFrames++;
 
     } else {
 
-        candidateGesture = newGesture;
+        candidateGesture =
+            newGesture;
+
         candidateFrames = 0;
     }
 
     if (
-        candidateFrames >= gestureConfirmFrames &&
-        currentGesture !== candidateGesture
+        candidateFrames >=
+        gestureConfirmFrames
     ) {
 
-        explodeShape();
+        if (
+            currentGesture !==
+            candidateGesture
+        ) {
 
-        currentGesture = candidateGesture;
+            explodeShape();
 
-        console.log("Gesture:", currentGesture);
+            currentGesture =
+                candidateGesture;
+
+            console.log(
+                "GESTURE:",
+                currentGesture
+            );
+        }
     }
 }
 
-// ===============================
-// PARTICLE
-// ===============================
+// ==========================================
+// PARTICLE CLASS
+// ==========================================
+
 class Particle {
 
-    constructor(x, y, power = 1) {
+    constructor(
+        x,
+        y,
+        power = 1
+    ) {
 
         this.x = x;
+
         this.y = y;
 
         const angle =
-            Math.random() * Math.PI * 2;
+            Math.random() *
+            Math.PI *
+            2;
 
         const speed =
-            (Math.random() * 8 + 2) * power;
+            (
+                Math.random() *
+                8 +
+                2
+            ) * power;
 
-        this.vx = Math.cos(angle) * speed;
-        this.vy = Math.sin(angle) * speed;
+        this.vx =
+            Math.cos(angle) *
+            speed;
+
+        this.vy =
+            Math.sin(angle) *
+            speed;
 
         this.life = 1;
 
         this.size =
-            Math.random() * 4 + 1;
+            Math.random() *
+            4 +
+            1;
     }
 
     update() {
 
         this.x += this.vx;
+
         this.y += this.vy;
 
         this.vx *= 0.97;
+
         this.vy *= 0.97;
 
         this.life -= 0.025;
@@ -284,7 +438,8 @@ class Particle {
 
     draw() {
 
-        ctx.globalAlpha = this.life;
+        ctx.globalAlpha =
+            this.life;
 
         ctx.beginPath();
 
@@ -302,38 +457,65 @@ class Particle {
     }
 }
 
-// ===============================
+// ==========================================
 // EXPLOSION
-// ===============================
+// ==========================================
+
 function explodeShape() {
 
-    const cx = handX * canvas.width;
-    const cy = handY * canvas.height;
+    const x =
+        handX *
+        canvas.width;
 
-    for (let i = 0; i < 90; i++) {
+    const y =
+        handY *
+        canvas.height;
+
+    for (
+        let i = 0;
+        i < 80;
+        i++
+    ) {
 
         particles.push(
             new Particle(
-                cx,
-                cy,
-                Math.random() * 2 + 0.5
+                x,
+                y,
+                Math.random() *
+                    2 +
+                    0.5
             )
         );
     }
 }
 
-// ===============================
-// UPDATE PARTICLES
-// ===============================
+// ==========================================
+// PARTICLE UPDATE
+// ==========================================
+
 function updateParticles() {
 
-    for (let i = particles.length - 1; i >= 0; i--) {
+    for (
+        let i =
+            particles.length -
+            1;
+
+        i >= 0;
+
+        i--
+    ) {
 
         particles[i].update();
 
-        if (particles[i].life <= 0) {
+        if (
+            particles[i].life <=
+            0
+        ) {
 
-            particles.splice(i, 1);
+            particles.splice(
+                i,
+                1
+            );
 
         } else {
 
@@ -342,15 +524,21 @@ function updateParticles() {
     }
 }
 
-// ===============================
-// SHAPES
-// ===============================
-function drawCircle(x, y) {
+// ==========================================
+// CIRCLE
+// ==========================================
+
+function drawCircle(
+    x,
+    y
+) {
 
     const radius =
-        100 + Math.sin(pulse) * 10;
+        100 +
+        Math.sin(pulse) *
+        10;
 
-    ctx.lineWidth = 8;
+    ctx.lineWidth = 6;
 
     ctx.beginPath();
 
@@ -365,28 +553,50 @@ function drawCircle(x, y) {
     ctx.stroke();
 }
 
-function drawHeart(x, y) {
+// ==========================================
+// HEART
+// ==========================================
+
+function drawHeart(
+    x,
+    y
+) {
 
     ctx.save();
 
-    ctx.translate(x, y);
+    ctx.translate(
+        x,
+        y
+    );
 
-    ctx.scale(5, 5);
+    ctx.scale(
+        4.5,
+        4.5
+    );
 
     ctx.beginPath();
 
-    ctx.moveTo(0, 30);
-
-    ctx.bezierCurveTo(
-        -50, -5,
-        -40, -45,
-        0, -20
+    ctx.moveTo(
+        0,
+        30
     );
 
     ctx.bezierCurveTo(
-        40, -45,
-        50, -5,
-        0, 30
+        -50,
+        -5,
+        -40,
+        -45,
+        0,
+        -20
+    );
+
+    ctx.bezierCurveTo(
+        40,
+        -45,
+        50,
+        -5,
+        0,
+        30
     );
 
     ctx.stroke();
@@ -394,34 +604,67 @@ function drawHeart(x, y) {
     ctx.restore();
 }
 
-function drawTriangle(x, y) {
+// ==========================================
+// TRIANGLE
+// ==========================================
+
+function drawTriangle(
+    x,
+    y
+) {
 
     const size = 120;
 
     ctx.save();
 
-    ctx.translate(x, y);
+    ctx.translate(
+        x,
+        y
+    );
 
-    ctx.rotate(rotation);
+    ctx.rotate(
+        rotation
+    );
 
     ctx.beginPath();
 
-    for (let i = 0; i < 3; i++) {
+    for (
+        let i = 0;
+        i < 3;
+        i++
+    ) {
 
         const angle =
             -Math.PI / 2 +
-            i * (Math.PI * 2 / 3);
+            i *
+                (
+                    Math.PI *
+                    2 /
+                    3
+                );
 
         const px =
-            Math.cos(angle) * size;
+            Math.cos(angle) *
+            size;
 
         const py =
-            Math.sin(angle) * size;
+            Math.sin(angle) *
+            size;
 
-        if (i === 0)
-            ctx.moveTo(px, py);
-        else
-            ctx.lineTo(px, py);
+        if (i === 0) {
+
+            ctx.moveTo(
+                px,
+                py
+            );
+
+        } else {
+
+            ctx.lineTo(
+                px,
+                py
+            );
+        }
     }
 
     ctx.closePath();
@@ -431,19 +674,32 @@ function drawTriangle(x, y) {
     ctx.restore();
 }
 
-function drawCube(x, y) {
+// ==========================================
+// CUBE
+// ==========================================
+
+function drawCube(
+    x,
+    y
+) {
 
     const size = 100;
 
-    ctx.save();
-
-    ctx.translate(x, y);
-
-    ctx.rotate(rotation * 0.5);
-
     const offset = 40;
 
+    ctx.save();
+
+    ctx.translate(
+        x,
+        y
+    );
+
+    ctx.rotate(
+        rotation * 0.5
+    );
+
     // Front
+
     ctx.strokeRect(
         -size / 2,
         -size / 2,
@@ -452,26 +708,54 @@ function drawCube(x, y) {
     );
 
     // Back
+
     ctx.strokeRect(
-        -size / 2 + offset,
-        -size / 2 - offset,
+        -size / 2 +
+            offset,
+
+        -size / 2 -
+            offset,
+
         size,
         size
     );
 
-    // Connections
     const corners = [
-        [-size / 2, -size / 2],
-        [size / 2, -size / 2],
-        [-size / 2, size / 2],
-        [size / 2, size / 2]
+
+        [
+            -size / 2,
+            -size / 2
+        ],
+
+        [
+            size / 2,
+            -size / 2
+        ],
+
+        [
+            -size / 2,
+            size / 2
+        ],
+
+        [
+            size / 2,
+            size / 2
+        ]
     ];
 
-    corners.forEach(([cx, cy]) => {
+    for (
+        const [
+            cx,
+            cy
+        ] of corners
+    ) {
 
         ctx.beginPath();
 
-        ctx.moveTo(cx, cy);
+        ctx.moveTo(
+            cx,
+            cy
+        );
 
         ctx.lineTo(
             cx + offset,
@@ -479,57 +763,102 @@ function drawCube(x, y) {
         );
 
         ctx.stroke();
-    });
+    }
 
     ctx.restore();
 }
 
-// ===============================
+// ==========================================
+// CHAOS
+// ==========================================
+
+function spawnChaos(
+    x,
+    y
+) {
+
+    for (
+        let i = 0;
+        i < 3;
+        i++
+    ) {
+
+        particles.push(
+            new Particle(
+                x,
+                y,
+                0.4
+            )
+        );
+    }
+}
+
+// ==========================================
 // DRAW SHAPE
-// ===============================
+// ==========================================
+
 function drawShape() {
 
-    const x = handX * canvas.width;
-    const y = handY * canvas.height;
+    const x =
+        handX *
+        canvas.width;
+
+    const y =
+        handY *
+        canvas.height;
 
     ctx.save();
 
-    ctx.lineWidth = 4;
+    ctx.lineWidth = 5;
 
     ctx.shadowBlur = 25;
 
-    ctx.beginPath();
-
-    switch (currentGesture) {
+    switch (
+        currentGesture
+    ) {
 
         case "CIRCLE":
-            drawCircle(x, y);
+
+            drawCircle(
+                x,
+                y
+            );
+
             break;
 
         case "HEART":
-            drawHeart(x, y);
+
+            drawHeart(
+                x,
+                y
+            );
+
             break;
 
         case "CUBE":
-            drawCube(x, y);
+
+            drawCube(
+                x,
+                y
+            );
+
             break;
 
         case "TRIANGLE":
-            drawTriangle(x, y);
+
+            drawTriangle(
+                x,
+                y
+            );
+
             break;
 
         case "CHAOS":
 
-            for (let i = 0; i < 4; i++) {
-
-                particles.push(
-                    new Particle(
-                        x,
-                        y,
-                        0.5
-                    )
-                );
-            }
+            spawnChaos(
+                x,
+                y
+            );
 
             break;
     }
@@ -537,16 +866,11 @@ function drawShape() {
     ctx.restore();
 }
 
-// ===============================
+// ==========================================
 // MAIN LOOP
-// ===============================
-async function loop() {
+// ==========================================
 
-    if (!handLandmarker) {
-
-        requestAnimationFrame(loop);
-        return;
-    }
+function loop() {
 
     ctx.clearRect(
         0,
@@ -556,14 +880,18 @@ async function loop() {
     );
 
     rotation += 0.02;
+
     pulse += 0.08;
 
     if (
+        handLandmarker &&
         video.readyState >= 2 &&
-        video.currentTime !== lastVideoTime
+        video.currentTime !==
+            lastVideoTime
     ) {
 
-        lastVideoTime = video.currentTime;
+        lastVideoTime =
+            video.currentTime;
 
         const results =
             handLandmarker.detectForVideo(
@@ -573,38 +901,77 @@ async function loop() {
 
         if (
             results.landmarks &&
-            results.landmarks.length > 0
+            results.landmarks.length >
+                0
         ) {
 
-            const landmarks =
+            const hand =
                 results.landmarks[0];
 
-            // Hand center
+            // ==========================
+            // HAND FOUND
+            // ==========================
+
+            const message =
+                "HAND FOUND";
+
+            console.log(
+                message
+            );
+
+            // ==========================
+            // HAND CENTER
+            // ==========================
+
             let targetX = 0;
+
             let targetY = 0;
 
-            for (const point of landmarks) {
+            for (
+                const point
+                of hand
+            ) {
 
-                targetX += point.x;
-                targetY += point.y;
+                targetX +=
+                    point.x;
+
+                targetY +=
+                    point.y;
             }
 
-            targetX /= landmarks.length;
-            targetY /= landmarks.length;
+            targetX /=
+                hand.length;
+
+            targetY /=
+                hand.length;
 
             handX +=
-                (targetX - handX) *
-                smoothing;
+                (
+                    targetX -
+                    handX
+                ) *
+                positionSmoothing;
 
             handY +=
-                (targetY - handY) *
-                smoothing;
+                (
+                    targetY -
+                    handY
+                ) *
+                positionSmoothing;
+
+            // ==========================
+            // FINGER COUNT
+            // ==========================
 
             const fingers =
-                countFingers(landmarks);
+                countFingers(
+                    hand
+                );
 
             const gesture =
-                getGesture(fingers);
+                getGesture(
+                    fingers
+                );
 
             fingerText.textContent =
                 `${fingers} fingers`;
@@ -612,43 +979,54 @@ async function loop() {
             gestureText.textContent =
                 gesture;
 
-            updateGesture(gesture);
+            updateGesture(
+                gesture
+            );
 
         } else {
 
-            fingerText.textContent =
-                "No hand";
-
             gestureText.textContent =
-                "Waiting...";
+                "NO HAND";
+
+            fingerText.textContent =
+                "0 fingers";
         }
     }
 
     drawShape();
+
     updateParticles();
 
-    requestAnimationFrame(loop);
+    requestAnimationFrame(
+        loop
+    );
 }
 
-// ===============================
+// ==========================================
 // SWITCH CAMERA
-// ===============================
-switchCamera.addEventListener(
-    "click",
-    async () => {
+// ==========================================
 
-        facingMode =
-            facingMode === "user"
-                ? "environment"
-                : "user";
+if (switchCamera) {
 
-        lastVideoTime = -1;
+    switchCamera.addEventListener(
+        "click",
+        async () => {
 
-        await startCamera();
-    }
-);
+            facingMode =
+                facingMode ===
+                "user"
 
-// ===============================
+                    ? "environment"
+
+                    : "user";
+
+            await startCamera();
+        }
+    );
+}
+
+// ==========================================
 // START
-// ===============================
-initHandTracking();
+// ==========================================
+
+init();
