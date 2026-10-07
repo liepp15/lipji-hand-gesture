@@ -4,7 +4,7 @@ import {
 } from "@mediapipe/tasks-vision";
 
 // ==========================================
-// ELEMENTS
+// ELEMENT
 // ==========================================
 
 const video = document.getElementById("camera");
@@ -14,7 +14,7 @@ const ctx = canvas.getContext("2d");
 const gestureText = document.getElementById("gesture");
 const fingerText = document.getElementById("fingerCount");
 const loading = document.getElementById("loading");
-const switchCamera = document.getElementById("switchCamera");
+
 
 // ==========================================
 // MEDIAPIPE
@@ -26,20 +26,9 @@ const WASM_URL =
 const MODEL_URL =
     "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 
-let handLandmarker = null;
-let stream = null;
-let facingMode = "user";
+let handLandmarker;
 let lastVideoTime = -1;
 
-// ==========================================
-// GESTURE
-// ==========================================
-
-let currentGesture = "NONE";
-let candidateGesture = "NONE";
-let candidateFrames = 0;
-
-const gestureConfirmFrames = 5;
 
 // ==========================================
 // HAND POSITION
@@ -48,27 +37,34 @@ const gestureConfirmFrames = 5;
 let handX = 0.5;
 let handY = 0.5;
 
-const positionSmoothing = 0.2;
+const POSITION_SMOOTHING = 0.2;
+
 
 // ==========================================
-// ANIMATION
+// GESTURE
 // ==========================================
 
-let rotation = 0;
-let pulse = 0;
+let currentGesture = "NONE";
+
+let detectedGesture = "NONE";
+let gestureFrames = 0;
+
+const GESTURE_CONFIRM_FRAMES = 4;
+
 
 // ==========================================
-// MORPH PARTICLES
+// PARTICLES
 // ==========================================
 
-const morphParticles = [];
+const PARTICLE_COUNT = 240;
 
-const PARTICLE_COUNT = 260;
+let particles = [];
 
 let morphing = false;
-let morphProgress = 1;
+let morphStart = 0;
 
-const MORPH_DURATION = 750;
+const MORPH_DURATION = 700;
+
 
 // ==========================================
 // INIT
@@ -108,62 +104,23 @@ async function init() {
 
         console.log("MediaPipe READY");
 
-        await startCamera();
 
-        loading.style.display = "none";
+        // ==================================
+        // CAMERA
+        // ==================================
 
-        requestAnimationFrame(loop);
-
-    } catch (error) {
-
-        console.error("INIT ERROR:", error);
-
-        loading.innerHTML = `
-            <div style="
-                color:#ff5555;
-                text-align:center;
-                padding:20px;
-            ">
-                <h3>Hand Tracking Error</h3>
-                <p>${error.message}</p>
-            </div>
-        `;
-    }
-}
-
-// ==========================================
-// CAMERA
-// ==========================================
-
-async function startCamera() {
-
-    try {
-
-        if (stream) {
-
-            stream
-                .getTracks()
-                .forEach(track => track.stop());
-        }
-
-        stream =
+        const stream =
             await navigator.mediaDevices.getUserMedia({
 
                 video: {
-
-                    facingMode: facingMode,
+                    facingMode: "user",
 
                     width: {
-                        ideal: 640
+                        ideal: 1280
                     },
 
                     height: {
-                        ideal: 480
-                    },
-
-                    frameRate: {
-                        ideal: 30,
-                        max: 30
+                        ideal: 720
                     }
                 },
 
@@ -174,40 +131,49 @@ async function startCamera() {
 
         await video.play();
 
-        console.log(
-            "VIDEO:",
-            video.videoWidth,
-            "x",
-            video.videoHeight
-        );
 
-        resizeCanvas();
+        loading.style.display = "none";
 
-        lastVideoTime = -1;
+        resize();
 
-    } catch (error) {
+        requestAnimationFrame(loop);
+
+    }
+
+    catch (error) {
 
         console.error(
-            "CAMERA ERROR:",
+            "INIT ERROR:",
             error
         );
+
+        loading.innerHTML = `
+            <p style="color:red">
+                ERROR: ${error.message}
+            </p>
+        `;
     }
 }
 
+
 // ==========================================
-// CANVAS
+// RESIZE
 // ==========================================
 
-function resizeCanvas() {
+function resize() {
 
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
+    canvas.width =
+        window.innerWidth;
+
+    canvas.height =
+        window.innerHeight;
 }
 
 window.addEventListener(
     "resize",
-    resizeCanvas
+    resize
 );
+
 
 // ==========================================
 // MATH
@@ -218,24 +184,221 @@ function lerp(a, b, t) {
     return a + (b - a) * t;
 }
 
-function easeInOut(t) {
+function ease(t) {
 
     return t < 0.5
+
         ? 2 * t * t
+
         : 1 -
-          Math.pow(-2 * t + 2, 2) / 2;
+          Math.pow(
+              -2 * t + 2,
+              2
+          ) / 2;
 }
 
+
 // ==========================================
-// SHAPE POINT GENERATORS
+// DISTANCE
 // ==========================================
 
-function generateCirclePoints(
-    count,
-    radius
-) {
+function distance(a, b) {
+
+    const dx =
+        a.x - b.x;
+
+    const dy =
+        a.y - b.y;
+
+    const dz =
+        a.z - b.z;
+
+    return Math.sqrt(
+        dx * dx +
+        dy * dy +
+        dz * dz
+    );
+}
+
+
+// ==========================================
+// FINGER COUNT
+// ==========================================
+
+function countFingers(hand) {
+
+    let count = 0;
+
+
+    // INDEX
+    if (
+        hand[8].y <
+        hand[6].y
+    ) {
+
+        count++;
+    }
+
+
+    // MIDDLE
+    if (
+        hand[12].y <
+        hand[10].y
+    ) {
+
+        count++;
+    }
+
+
+    // RING
+    if (
+        hand[16].y <
+        hand[14].y
+    ) {
+
+        count++;
+    }
+
+
+    // PINKY
+    if (
+        hand[20].y <
+        hand[18].y
+    ) {
+
+        count++;
+    }
+
+
+    // THUMB
+    const thumbTip =
+        hand[4];
+
+    const thumbIP =
+        hand[3];
+
+    const thumbBase =
+        hand[5];
+
+    if (
+        distance(
+            thumbTip,
+            thumbBase
+        )
+        >
+        distance(
+            thumbIP,
+            thumbBase
+        )
+    ) {
+
+        count++;
+    }
+
+
+    return count;
+}
+
+
+// ==========================================
+// FINGER → GESTURE
+// ==========================================
+
+function getGesture(fingers) {
+
+    switch (fingers) {
+
+        case 0:
+            return "CIRCLE";
+
+        case 1:
+            return "HEART";
+
+        case 2:
+            return "CUBE";
+
+        case 3:
+            return "TRIANGLE";
+
+        case 5:
+            return "CHAOS";
+
+        default:
+            return "NONE";
+    }
+}
+
+
+// ==========================================
+// GESTURE SMOOTHING
+// ==========================================
+
+function updateGesture(newGesture) {
+
+    if (
+        newGesture ===
+        detectedGesture
+    ) {
+
+        gestureFrames++;
+
+    } else {
+
+        detectedGesture =
+            newGesture;
+
+        gestureFrames = 0;
+    }
+
+
+    if (
+        gestureFrames >=
+        GESTURE_CONFIRM_FRAMES
+    ) {
+
+        if (
+            currentGesture !==
+            detectedGesture
+        ) {
+
+            const oldGesture =
+                currentGesture;
+
+            currentGesture =
+                detectedGesture;
+
+            console.log(
+                "GESTURE:",
+                oldGesture,
+                "→",
+                currentGesture
+            );
+
+
+            if (
+                currentGesture !==
+                "NONE"
+            ) {
+
+                startMorph(
+                    oldGesture,
+                    currentGesture
+                );
+            }
+        }
+    }
+}
+
+
+// ==========================================
+// SHAPE POINTS
+// ==========================================
+
+function circlePoints(count) {
 
     const points = [];
+
+    const radius = 110;
 
     for (
         let i = 0;
@@ -244,7 +407,8 @@ function generateCirclePoints(
     ) {
 
         const angle =
-            (i / count) *
+            i /
+            count *
             Math.PI *
             2;
 
@@ -263,14 +427,16 @@ function generateCirclePoints(
     return points;
 }
 
-// ------------------------------------------
 
-function generateHeartPoints(
-    count,
-    scale
-) {
+// ==========================================
+// HEART
+// ==========================================
+
+function heartPoints(count) {
 
     const points = [];
+
+    const scale = 7;
 
     for (
         let i = 0;
@@ -279,9 +445,11 @@ function generateHeartPoints(
     ) {
 
         const t =
-            (i / count) *
+            i /
+            count *
             Math.PI *
             2;
+
 
         const x =
             16 *
@@ -290,34 +458,52 @@ function generateHeartPoints(
                 3
             );
 
+
         const y =
             -(
                 13 *
-                    Math.cos(t) -
+                    Math.cos(t)
+
+                -
                 5 *
-                    Math.cos(2 * t) -
+                    Math.cos(
+                        2 * t
+                    )
+
+                -
                 2 *
-                    Math.cos(3 * t) -
-                Math.cos(4 * t)
+                    Math.cos(
+                        3 * t
+                    )
+
+                -
+                Math.cos(
+                    4 * t
+                )
             );
+
 
         points.push({
 
-            x: x * scale,
+            x:
+                x * scale,
 
-            y: y * scale
+            y:
+                y * scale
         });
     }
 
     return points;
 }
 
-// ------------------------------------------
 
-function generateTrianglePoints(
-    count,
-    size
-) {
+// ==========================================
+// TRIANGLE
+// ==========================================
+
+function trianglePoints(count) {
+
+    const size = 125;
 
     const vertices = [
 
@@ -337,12 +523,14 @@ function generateTrianglePoints(
         }
     ];
 
+
     const points = [];
 
     const perSide =
         Math.floor(
             count / 3
         );
+
 
     for (
         let side = 0;
@@ -357,6 +545,7 @@ function generateTrianglePoints(
             vertices[
                 (side + 1) % 3
             ];
+
 
         for (
             let i = 0;
@@ -389,102 +578,97 @@ function generateTrianglePoints(
     return points;
 }
 
-// ------------------------------------------
 
-function generateCubePoints(
-    count,
-    size
-) {
+// ==========================================
+// CUBE
+// ==========================================
 
-    const s = size;
-    const o = size * 0.38;
+function cubePoints(count) {
+
+    const s = 75;
+    const offset = 30;
 
     const lines = [
 
-        // Front
+        // FRONT
+        [[-s, -s], [s, -s]],
+        [[s, -s], [s, s]],
+        [[s, s], [-s, s]],
+        [[-s, s], [-s, -s]],
+
+        // BACK
+        [
+            [-s + offset, -s - offset],
+            [s + offset, -s - offset]
+        ],
+
+        [
+            [s + offset, -s - offset],
+            [s + offset, s - offset]
+        ],
+
+        [
+            [s + offset, s - offset],
+            [-s + offset, s - offset]
+        ],
+
+        [
+            [-s + offset, s - offset],
+            [-s + offset, -s - offset]
+        ],
+
+        // CONNECTORS
         [
             [-s, -s],
-            [s, -s]
+            [-s + offset, -s - offset]
         ],
 
         [
             [s, -s],
-            [s, s]
+            [s + offset, -s - offset]
         ],
 
         [
             [s, s],
-            [-s, s]
+            [s + offset, s - offset]
         ],
 
         [
             [-s, s],
-            [-s, -s]
-        ],
-
-        // Back
-        [
-            [-s + o, -s - o],
-            [s + o, -s - o]
-        ],
-
-        [
-            [s + o, -s - o],
-            [s + o, s - o]
-        ],
-
-        [
-            [s + o, s - o],
-            [-s + o, s - o]
-        ],
-
-        [
-            [-s + o, s - o],
-            [-s + o, -s - o]
-        ],
-
-        // Connections
-        [
-            [-s, -s],
-            [-s + o, -s - o]
-        ],
-
-        [
-            [s, -s],
-            [s + o, -s - o]
-        ],
-
-        [
-            [s, s],
-            [s + o, s - o]
-        ],
-
-        [
-            [-s, s],
-            [-s + o, s - o]
+            [-s + offset, s - offset]
         ]
     ];
+
 
     const points = [];
 
     const perLine =
         Math.ceil(
-            count / lines.length
+            count /
+            lines.length
         );
 
+
     for (
-        const line of lines
+        const line
+        of lines
     ) {
 
         const a = {
+
             x: line[0][0],
+
             y: line[0][1]
         };
 
+
         const b = {
+
             x: line[1][0],
+
             y: line[1][1]
         };
+
 
         for (
             let i = 0;
@@ -493,7 +677,9 @@ function generateCubePoints(
         ) {
 
             const t =
-                i / perLine;
+                i /
+                perLine;
+
 
             points.push({
 
@@ -514,117 +700,184 @@ function generateCubePoints(
         }
     }
 
+
     return points;
 }
 
+
 // ==========================================
-// GET SHAPE POINTS
+// RANDOM CHAOS
+// ==========================================
+
+function chaosPoints(count) {
+
+    const points = [];
+
+    for (
+        let i = 0;
+        i < count;
+        i++
+    ) {
+
+        const angle =
+            Math.random() *
+            Math.PI *
+            2;
+
+        const radius =
+            Math.random() *
+            180;
+
+        points.push({
+
+            x:
+                Math.cos(angle) *
+                radius,
+
+            y:
+                Math.sin(angle) *
+                radius
+        });
+    }
+
+    return points;
+}
+
+
+// ==========================================
+// GET SHAPE
 // ==========================================
 
 function getShapePoints(
-    gesture,
-    count
+    gesture
 ) {
 
     switch (gesture) {
 
         case "CIRCLE":
-
-            return generateCirclePoints(
-                count,
-                110
+            return circlePoints(
+                PARTICLE_COUNT
             );
 
         case "HEART":
-
-            return generateHeartPoints(
-                count,
-                7
+            return heartPoints(
+                PARTICLE_COUNT
             );
 
         case "TRIANGLE":
-
-            return generateTrianglePoints(
-                count,
-                125
+            return trianglePoints(
+                PARTICLE_COUNT
             );
 
         case "CUBE":
+            return cubePoints(
+                PARTICLE_COUNT
+            );
 
-            return generateCubePoints(
-                count,
-                75
+        case "CHAOS":
+            return chaosPoints(
+                PARTICLE_COUNT
             );
 
         default:
-
-            return generateCirclePoints(
-                count,
-                110
+            return chaosPoints(
+                PARTICLE_COUNT
             );
     }
 }
 
+
 // ==========================================
-// MORPH PARTICLE
+// PARTICLE CLASS
 // ==========================================
 
-class MorphParticle {
+class Particle {
 
-    constructor() {
+    constructor(
+        start,
+        target
+    ) {
 
-        this.x = 0;
-        this.y = 0;
+        this.startX =
+            start.x;
 
-        this.startX = 0;
-        this.startY = 0;
+        this.startY =
+            start.y;
 
-        this.targetX = 0;
-        this.targetY = 0;
+        this.targetX =
+            target.x;
 
-        this.vx = 0;
-        this.vy = 0;
+        this.targetY =
+            target.y;
+
+
+        this.x =
+            start.x;
+
+        this.y =
+            start.y;
+
 
         this.size =
             Math.random() *
-            2.5 +
+            2 +
             1;
 
-        this.alpha = 1;
 
         this.delay =
             Math.random() *
-            0.2;
+            0.18;
 
-        this.noise =
+
+        this.arc =
+            (
+                Math.random() -
+                0.5
+            ) *
+            80;
+
+
+        this.angle =
             Math.random() *
             Math.PI *
             2;
     }
 
+
     update(progress) {
 
         let t =
+            (
+                progress -
+                this.delay
+            ) /
+            (
+                1 -
+                this.delay
+            );
+
+
+        t =
             Math.max(
                 0,
                 Math.min(
                     1,
-                    (progress -
-                        this.delay) /
-                        (1 -
-                            this.delay)
+                    t
                 )
             );
 
-        t = easeInOut(t);
 
-        // Main morph
+        t =
+            ease(t);
+
+
         this.x =
             lerp(
                 this.startX,
                 this.targetX,
                 t
             );
+
 
         this.y =
             lerp(
@@ -633,81 +886,91 @@ class MorphParticle {
                 t
             );
 
-        // Explosion offset
-        const explosion =
+
+        // CURVED MOTION
+        const curve =
             Math.sin(
-                t * Math.PI
+                t *
+                Math.PI
             );
 
-        const angle =
-            this.noise +
-            t * 4;
 
         this.x +=
-            Math.cos(angle) *
-            explosion *
-            35;
+            Math.cos(
+                this.angle
+            ) *
+            this.arc *
+            curve;
+
 
         this.y +=
-            Math.sin(angle) *
-            explosion *
-            35;
-
-        this.alpha =
-            0.35 +
-            0.65 *
-                Math.sin(
-                    Math.PI *
-                        Math.min(
-                            1,
-                            t + 0.1
-                        )
-                );
+            Math.sin(
+                this.angle
+            ) *
+            this.arc *
+            curve;
     }
 
-    draw(cx, cy) {
 
-        ctx.globalAlpha =
-            this.alpha;
+    draw() {
 
         ctx.beginPath();
 
         ctx.arc(
-            cx + this.x,
-            cy + this.y,
+            this.x,
+            this.y,
             this.size,
             0,
             Math.PI * 2
         );
 
         ctx.fill();
-
-        ctx.globalAlpha = 1;
     }
 }
 
+
 // ==========================================
-// CREATE MORPH
+// START MORPH
 // ==========================================
 
-function createMorph(
+function startMorph(
     fromGesture,
     toGesture
 ) {
 
-    const fromPoints =
-        getShapePoints(
-            fromGesture,
-            PARTICLE_COUNT
-        );
+    let startPoints;
+
+
+    // First shape
+    if (
+        fromGesture ===
+        "NONE"
+    ) {
+
+        startPoints =
+            chaosPoints(
+                PARTICLE_COUNT
+            );
+
+    }
+
+    else {
+
+        startPoints =
+            getShapePoints(
+                fromGesture
+            );
+    }
+
 
     const targetPoints =
         getShapePoints(
-            toGesture,
-            PARTICLE_COUNT
+            toGesture
         );
 
-    morphParticles.length = 0;
+
+    particles = [];
+
 
     for (
         let i = 0;
@@ -715,552 +978,173 @@ function createMorph(
         i++
     ) {
 
-        const start =
-            fromPoints[
-                i %
-                    fromPoints.length
-            ];
+        particles.push(
+            new Particle(
 
-        const target =
-            targetPoints[
-                i %
+                startPoints[
+                    i %
+                    startPoints.length
+                ],
+
+                targetPoints[
+                    i %
                     targetPoints.length
-            ];
-
-        const particle =
-            new MorphParticle();
-
-        particle.startX =
-            start.x;
-
-        particle.startY =
-            start.y;
-
-        particle.targetX =
-            target.x;
-
-        particle.targetY =
-            target.y;
-
-        particle.x =
-            start.x;
-
-        particle.y =
-            start.y;
-
-        morphParticles.push(
-            particle
+                ]
+            )
         );
     }
+
 
     morphing = true;
 
-    morphProgress = 0;
+    morphStart =
+        performance.now();
 }
 
+
 // ==========================================
-// DRAW MORPH
+// UPDATE PARTICLES
 // ==========================================
 
-let morphStartTime = 0;
-
-function updateMorph() {
-
-    if (!morphing)
-        return;
+function updateParticles() {
 
     if (
-        morphStartTime === 0
+        particles.length === 0
     ) {
 
-        morphStartTime =
-            performance.now();
+        return;
     }
+
 
     const elapsed =
         performance.now() -
-        morphStartTime;
+        morphStart;
 
-    morphProgress =
+
+    let progress =
+        elapsed /
+        MORPH_DURATION;
+
+
+    progress =
         Math.min(
             1,
-            elapsed /
-                MORPH_DURATION
+            progress
         );
+
 
     for (
         const particle
-        of morphParticles
+        of particles
     ) {
 
         particle.update(
-            morphProgress
+            progress
         );
     }
 
+
     if (
-        morphProgress >= 1
+        progress >= 1
     ) {
 
         morphing = false;
-
-        morphStartTime = 0;
     }
 }
 
+
 // ==========================================
-// DRAW MORPH PARTICLES
+// DRAW PARTICLES
 // ==========================================
 
-function drawMorph() {
+function drawParticles() {
 
-    const cx =
+    if (
+        particles.length === 0
+    ) {
+
+        return;
+    }
+
+
+    const centerX =
         handX *
         canvas.width;
 
-    const cy =
+    const centerY =
         handY *
         canvas.height;
 
-    ctx.save();
-
-    ctx.shadowBlur = 20;
-
-    for (
-        const particle
-        of morphParticles
-    ) {
-
-        particle.draw(
-            cx,
-            cy
-        );
-    }
-
-    ctx.restore();
-}
-
-// ==========================================
-// START MORPH
-// ==========================================
-
-function startShapeTransition(
-    oldGesture,
-    newGesture
-) {
-
-    if (
-        oldGesture === "NONE"
-    ) {
-
-        createMorph(
-            "CIRCLE",
-            newGesture
-        );
-
-    } else {
-
-        createMorph(
-            oldGesture,
-            newGesture
-        );
-    }
-}
-
-// ==========================================
-// FINGER DETECTION
-// ==========================================
-
-function distance(a, b) {
-
-    const dx =
-        a.x - b.x;
-
-    const dy =
-        a.y - b.y;
-
-    const dz =
-        a.z - b.z;
-
-    return Math.sqrt(
-        dx * dx +
-        dy * dy +
-        dz * dz
-    );
-}
-
-function countFingers(hand) {
-
-    let count = 0;
-
-    if (
-        hand[8].y <
-        hand[6].y
-    ) count++;
-
-    if (
-        hand[12].y <
-        hand[10].y
-    ) count++;
-
-    if (
-        hand[16].y <
-        hand[14].y
-    ) count++;
-
-    if (
-        hand[20].y <
-        hand[18].y
-    ) count++;
-
-    const thumbTip =
-        hand[4];
-
-    const thumbIP =
-        hand[3];
-
-    const thumbBase =
-        hand[5];
-
-    if (
-        distance(
-            thumbTip,
-            thumbBase
-        ) >
-        distance(
-            thumbIP,
-            thumbBase
-        )
-    ) {
-
-        count++;
-    }
-
-    return count;
-}
-
-// ==========================================
-// GESTURE
-// ==========================================
-
-function getGesture(
-    fingers
-) {
-
-    if (fingers === 0)
-        return "CIRCLE";
-
-    if (fingers === 1)
-        return "HEART";
-
-    if (fingers === 2)
-        return "CUBE";
-
-    if (fingers === 3)
-        return "TRIANGLE";
-
-    if (fingers === 5)
-        return "CHAOS";
-
-    return "NONE";
-}
-
-// ==========================================
-// GESTURE SMOOTHING
-// ==========================================
-
-function updateGesture(
-    gesture
-) {
-
-    if (
-        gesture ===
-        candidateGesture
-    ) {
-
-        candidateFrames++;
-
-    } else {
-
-        candidateGesture =
-            gesture;
-
-        candidateFrames = 0;
-    }
-
-    if (
-        candidateFrames >=
-        gestureConfirmFrames
-    ) {
-
-        if (
-            currentGesture !==
-            candidateGesture
-        ) {
-
-            const oldGesture =
-                currentGesture;
-
-            currentGesture =
-                candidateGesture;
-
-            console.log(
-                "MORPH:",
-                oldGesture,
-                "→",
-                currentGesture
-            );
-
-            if (
-                currentGesture !==
-                "NONE"
-            ) {
-
-                startShapeTransition(
-                    oldGesture,
-                    currentGesture
-                );
-            }
-        }
-    }
-}
-
-// ==========================================
-// DRAW FINAL SHAPE
-// ==========================================
-
-function drawFinalShape() {
-
-    if (morphing)
-        return;
-
-    if (
-        currentGesture ===
-        "NONE"
-    )
-        return;
-
-    const x =
-        handX *
-        canvas.width;
-
-    const y =
-        handY *
-        canvas.height;
 
     ctx.save();
 
     ctx.translate(
-        x,
-        y
+        centerX,
+        centerY
     );
 
-    ctx.rotate(
-        rotation
-    );
 
-    ctx.lineWidth = 4;
+    ctx.fillStyle =
+        "#00ffcc";
 
-    ctx.shadowBlur = 25;
+    ctx.shadowColor =
+        "#00ffcc";
 
-    if (
-        currentGesture ===
-        "CIRCLE"
+    ctx.shadowBlur =
+        15;
+
+
+    for (
+        const particle
+        of particles
     ) {
 
-        ctx.beginPath();
-
-        ctx.arc(
-            0,
-            0,
-            110 +
-                Math.sin(
-                    pulse
-                ) *
-                    8,
-            0,
-            Math.PI * 2
-        );
-
-        ctx.stroke();
+        particle.draw();
     }
 
-    else if (
-        currentGesture ===
-        "HEART"
-    ) {
-
-        const points =
-            generateHeartPoints(
-                160,
-                7
-            );
-
-        ctx.beginPath();
-
-        points.forEach(
-            (
-                point,
-                index
-            ) => {
-
-                if (
-                    index === 0
-                ) {
-
-                    ctx.moveTo(
-                        point.x,
-                        point.y
-                    );
-
-                } else {
-
-                    ctx.lineTo(
-                        point.x,
-                        point.y
-                    );
-                }
-            }
-        );
-
-        ctx.closePath();
-
-        ctx.stroke();
-    }
-
-    else if (
-        currentGesture ===
-        "TRIANGLE"
-    ) {
-
-        const points =
-            generateTrianglePoints(
-                180,
-                125
-            );
-
-        ctx.beginPath();
-
-        points.forEach(
-            (
-                point,
-                index
-            ) => {
-
-                if (
-                    index === 0
-                ) {
-
-                    ctx.moveTo(
-                        point.x,
-                        point.y
-                    );
-
-                } else {
-
-                    ctx.lineTo(
-                        point.x,
-                        point.y
-                    );
-                }
-            }
-        );
-
-        ctx.closePath();
-
-        ctx.stroke();
-    }
-
-    else if (
-        currentGesture ===
-        "CUBE"
-    ) {
-
-        const points =
-            generateCubePoints(
-                220,
-                75
-            );
-
-        ctx.beginPath();
-
-        for (
-            let i = 0;
-            i <
-            points.length - 1;
-            i++
-        ) {
-
-            ctx.moveTo(
-                points[i].x,
-                points[i].y
-            );
-
-            ctx.lineTo(
-                points[i + 1].x,
-                points[i + 1].y
-            );
-        }
-
-        ctx.stroke();
-    }
 
     ctx.restore();
 }
 
+
 // ==========================================
-// CHAOS PARTICLES
+// DRAW HAND LANDMARKS
 // ==========================================
 
-function drawChaos() {
+function drawLandmarks(hand) {
 
-    if (
-        currentGesture !==
-        "CHAOS"
-    )
-        return;
+    ctx.fillStyle =
+        "#00ffcc";
 
-    const x =
-        handX *
-        canvas.width;
-
-    const y =
-        handY *
-        canvas.height;
 
     for (
-        let i = 0;
-        i < 4;
-        i++
+        const point
+        of hand
     ) {
 
-        const particle =
-            new MorphParticle();
+        const x =
+            point.x *
+            canvas.width;
 
-        particle.x =
-            Math.random() *
-                300 -
-            150;
+        const y =
+            point.y *
+            canvas.height;
 
-        particle.y =
-            Math.random() *
-                300 -
-            150;
 
-        particle.size =
-            Math.random() *
-                4 +
-            1;
+        ctx.beginPath();
 
-        particle.alpha =
-            Math.random();
-
-        particle.draw(
+        ctx.arc(
             x,
-            y
+            y,
+            4,
+            0,
+            Math.PI * 2
         );
+
+        ctx.fill();
     }
 }
+
 
 // ==========================================
 // MAIN LOOP
@@ -1275,11 +1159,6 @@ function loop() {
         canvas.height
     );
 
-    rotation +=
-        0.008;
-
-    pulse +=
-        0.08;
 
     if (
         handLandmarker &&
@@ -1291,11 +1170,13 @@ function loop() {
         lastVideoTime =
             video.currentTime;
 
+
         const results =
             handLandmarker.detectForVideo(
                 video,
                 performance.now()
             );
+
 
         if (
             results.landmarks &&
@@ -1306,8 +1187,14 @@ function loop() {
             const hand =
                 results.landmarks[0];
 
+
+            // ==================================
+            // HAND POSITION
+            // ==================================
+
             let targetX = 0;
             let targetY = 0;
+
 
             for (
                 const point
@@ -1321,88 +1208,99 @@ function loop() {
                     point.y;
             }
 
+
             targetX /=
                 hand.length;
 
             targetY /=
                 hand.length;
 
+
             handX +=
                 (
                     targetX -
                     handX
                 ) *
-                positionSmoothing;
+                POSITION_SMOOTHING;
+
 
             handY +=
                 (
                     targetY -
                     handY
                 ) *
-                positionSmoothing;
+                POSITION_SMOOTHING;
+
+
+            // ==================================
+            // FINGER COUNT
+            // ==================================
 
             const fingers =
                 countFingers(
                     hand
                 );
 
+
             const gesture =
                 getGesture(
                     fingers
                 );
 
+
             fingerText.textContent =
                 `${fingers} fingers`;
+
 
             gestureText.textContent =
                 gesture;
 
+
+            // ==================================
+            // GESTURE SMOOTHING
+            // ==================================
+
             updateGesture(
                 gesture
             );
+
+
+            // ==================================
+            // DEBUG LANDMARK
+            // ==================================
+
+            // Kalau mau lihat titik tangan,
+            // uncomment baris berikut:
+
+            // drawLandmarks(hand);
+
+        }
+
+        else {
+
+            gestureText.textContent =
+                "NO HAND";
+
+            fingerText.textContent =
+                "0 fingers";
         }
     }
 
-    updateMorph();
 
-    if (morphing) {
+    // ==================================
+    // PARTICLE SYSTEM
+    // ==================================
 
-        drawMorph();
+    updateParticles();
 
-    } else {
+    drawParticles();
 
-        drawFinalShape();
-
-        drawChaos();
-    }
 
     requestAnimationFrame(
         loop
     );
 }
 
-// ==========================================
-// SWITCH CAMERA
-// ==========================================
-
-if (switchCamera) {
-
-    switchCamera.addEventListener(
-        "click",
-        async () => {
-
-            facingMode =
-                facingMode ===
-                "user"
-
-                    ? "environment"
-
-                    : "user";
-
-            await startCamera();
-        }
-    );
-}
 
 // ==========================================
 // START
