@@ -575,6 +575,8 @@ async function loop() {
             results.landmarks &&
             results.landmarks.length > 0
         ) {
+            
+            console.log("HAND DETECTED", results.landmarks[0]);
 
             const landmarks =
                 results.landmarks[0];
